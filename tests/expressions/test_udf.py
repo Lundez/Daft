@@ -423,3 +423,22 @@ def test_udf_invalid_batch_sizes():
 
     with pytest.raises(OverflowError):
         table.eval_expression_list([noop.override_options(batch_size=-1)(col("a"))])
+
+
+def test_udf_multiple_columns():
+    table = MicroPartition.from_pydict({"a": ["foo", "bar", "baz"]})
+
+    @udf(return_dtype={"col1": DataType.string(), "col2": DataType.int64()})
+    def split_and_length(data):
+        return {"col1": Series.from_pylist([d.as_py() for d in data.to_arrow()]),
+                "col2": Series.from_pylist([len(d.as_py()) for d in data.to_arrow()])}
+
+    expr = split_and_length(col("a"))
+    fields = [e._to_field(table.schema()) for e in expr]
+    assert fields[0].name == "col1"
+    assert fields[0].dtype == DataType.string()
+    assert fields[1].name == "col2"
+    assert fields[1].dtype == DataType.int64()
+
+    result = table.eval_expression_list(expr)
+    assert result.to_pydict() == {"col1": ["foo", "bar", "baz"], "col2": [3, 3, 3]}
