@@ -12,7 +12,7 @@ from daft.expressions import Expression
 from daft.series import PySeries, Series
 
 InitArgsType = Optional[Tuple[Tuple[Any, ...], Dict[str, Any]]]
-UdfReturnType = Union[Series, list, "np.ndarray", "pa.Array", "pa.ChunkedArray"]
+UdfReturnType = Union[Series, list, "np.ndarray", "pa.Array", "pa.ChunkedArray", dict]
 UserDefinedPyFunc = Callable[..., UdfReturnType]
 UserDefinedPyFuncLike = Union[UserDefinedPyFunc, type]
 
@@ -82,7 +82,7 @@ def run_udf(
     evaluated_expressions: list[Series],
     py_return_dtype: PyDataType,
     batch_size: int | None,
-) -> PySeries:
+) -> list[PySeries]:
     """API to call from Rust code that will call an UDF (initialized, in the case of actor pool UDFs) on the inputs."""
     return_dtype = DataType._from_pydatatype(py_return_dtype)
     kwarg_keys = list(bound_args.bound_args.kwargs.keys())
@@ -160,19 +160,22 @@ def run_udf(
     # Post-processing of results into a Series of the appropriate dtype
     if isinstance(results[0], Series):
         result_series = Series.concat(results)  # type: ignore
-        return result_series.rename(name).cast(return_dtype)._series
+        return [result_series.rename(name).cast(return_dtype)._series]
     elif isinstance(results[0], list):
         result_list = [x for res in results for x in res]  # type: ignore
         if return_dtype == DataType.python():
-            return Series.from_pylist(result_list, name=name, pyobj="force")._series
+            return [Series.from_pylist(result_list, name=name, pyobj="force")._series]
         else:
-            return Series.from_pylist(result_list, name=name, pyobj="allow").cast(return_dtype)._series
+            return [Series.from_pylist(result_list, name=name, pyobj="allow").cast(return_dtype)._series]
     elif np.module_available() and isinstance(results[0], np.ndarray):
         result_np = np.concatenate(results)
-        return Series.from_numpy(result_np, name=name).cast(return_dtype)._series
+        return [Series.from_numpy(result_np, name=name).cast(return_dtype)._series]
     elif pa.module_available() and isinstance(results[0], (pa.Array, pa.ChunkedArray)):
         result_pa = pa.concat_arrays(results)
-        return Series.from_arrow(result_pa, name=name).cast(return_dtype)._series
+        return [Series.from_arrow(result_pa, name=name).cast(return_dtype)._series]
+    elif isinstance(results[0], dict):
+        result_dict = {k: [x[k] for x in results] for k in results[0].keys()}
+        return [Series.from_pylist(result_dict[k], name=k).cast(return_dtype)._series for k in result_dict]
     else:
         raise NotImplementedError(f"Return type not supported for UDF: {type(results[0])}")
 
@@ -231,23 +234,25 @@ class UDF:
         else:
             self.wrapped_inner = UninitializedUdf(lambda: self.inner)
 
-    def __call__(self, *args, **kwargs) -> Expression:
+    def __call__(self, *args, **kwargs) -> list[Expression]:
         self._validate_init_args()
 
         bound_args = self._bind_args(*args, **kwargs)
         expressions = list(bound_args.expressions().values())
 
-        return Expression.udf(
-            name=self.name,
-            inner=self.wrapped_inner,
-            bound_args=bound_args,
-            expressions=expressions,
-            return_dtype=self.return_dtype,
-            init_args=self.init_args,
-            resource_request=self.resource_request,
-            batch_size=self.batch_size,
-            concurrency=self.concurrency,
-        )
+        return [
+            Expression.udf(
+                name=self.name,
+                inner=self.wrapped_inner,
+                bound_args=bound_args,
+                expressions=expressions,
+                return_dtype=self.return_dtype,
+                init_args=self.init_args,
+                resource_request=self.resource_request,
+                batch_size=self.batch_size,
+                concurrency=self.concurrency,
+            )
+        ]
 
     def override_options(
         self,
@@ -364,15 +369,15 @@ class UDF:
         >>> df.show()
         ╭───────┬─────────────┬─────────────────────╮
         │ foo   ┆ bar_world   ┆ bar_custom          │
-        │ ---   ┆ ---         ┆ ---                 │
-        │ Utf8  ┆ Utf8        ┆ Utf8                │
-        ╞═══════╪═════════════╪═════════════════════╡
+        │ ---   ┆ ---         │
+        │ Utf8  ┆ Utf8        │
+        ╞═══════╪═════════════╡
         │ hello ┆ hello world ┆ hello my old friend │
-        ├╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤
+        ├╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌┤
         │ hello ┆ hello world ┆ hello my old friend │
-        ├╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤
+        ├╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌┤
         │ hello ┆ hello world ┆ hello my old friend │
-        ╰───────┴─────────────┴─────────────────────╯
+        ╰───────┴─────────────╯
         <BLANKLINE>
         (Showing first 3 of 3 rows)
         """

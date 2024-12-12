@@ -1045,7 +1045,7 @@ class DataFrame:
         Args:
           uri: The URI of the Lance table to write to
           mode: The write mode. One of "create", "append", or "overwrite"
-          io_config (IOConfig, optional): configurations to use when interacting with remote storage.
+          io_config (Optional[IOConfig], optional): configurations to use when interacting with remote storage.
           **kwargs: Additional keyword arguments to pass to the Lance writer.
 
         Example:
@@ -2974,209 +2974,37 @@ class DataFrame:
         )
         return df
 
-
-@dataclass
-class GroupedDataFrame:
-    df: DataFrame
-    group_by: ExpressionsProjection
-
-    def __post_init__(self):
-        resolved_groupby_schema = self.group_by.resolve_schema(self.df._builder.schema())
-        for field, e in zip(resolved_groupby_schema, self.group_by):
-            if field.dtype == DataType.null():
-                raise ExpressionTypeError(f"Cannot groupby on null type expression: {e}")
-
-    def __getitem__(self, item: Union[slice, int, str, Iterable[Union[str, int]]]) -> Union[Expression, "DataFrame"]:
-        """Gets a column from the DataFrame as an Expression."""
-        return self.df.__getitem__(item)
-
-    def sum(self, *cols: ColumnInputType) -> "DataFrame":
-        """Perform grouped sum on this GroupedDataFrame.
-
-        Args:
-            *cols (Union[str, Expression]): columns to sum
-
-        Returns:
-            DataFrame: DataFrame with grouped sums.
-        """
-        return self.df._apply_agg_fn(Expression.sum, cols, self.group_by)
-
-    def mean(self, *cols: ColumnInputType) -> "DataFrame":
-        """Performs grouped mean on this GroupedDataFrame.
-
-        Args:
-            *cols (Union[str, Expression]): columns to mean
-
-        Returns:
-            DataFrame: DataFrame with grouped mean.
-        """
-        return self.df._apply_agg_fn(Expression.mean, cols, self.group_by)
-
-    def stddev(self, *cols: ColumnInputType) -> "DataFrame":
-        """Performs grouped standard deviation on this GroupedDataFrame.
+    @DataframePublicAPI
+    def map(self, udf: Expression) -> "DataFrame":
+        """Apply a user-defined function to each row.
 
         Example:
             >>> import daft
-            >>> df = daft.from_pydict({"keys": ["a", "a", "a", "b"], "col_a": [0, 1, 2, 100]})
-            >>> df = df.groupby("keys").stddev()
+            >>> df = daft.from_pydict({"a": [1, 2, 3], "b": [4, 5, 6]})
+            >>> @daft.udf(return_dtype=daft.DataType.int64())
+            ... def add(a, b):
+            ...     return a + b
+            >>> df = df.map(add(df["a"], df["b"]))
             >>> df.show()
-            ╭──────┬───────────────────╮
-            │ keys ┆ col_a             │
-            │ ---  ┆ ---               │
-            │ Utf8 ┆ Float64           │
-            ╞══════╪═══════════════════╡
-            │ a    ┆ 0.816496580927726 │
-            ├╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤
-            │ b    ┆ 0                 │
-            ╰──────┴───────────────────╯
+            ╭───────╮
+            │ add   │
+            │ ---   │
+            │ Int64 │
+            ╞═══════╡
+            │ 5     │
+            ├╌╌╌╌╌╌╌┤
+            │ 7     │
+            ├╌╌╌╌╌╌╌┤
+            │ 9     │
+            ╰───────╯
             <BLANKLINE>
-            (Showing first 2 of 2 rows)
+            (Showing first 3 of 3 rows)
 
         Args:
-            *cols (Union[str, Expression]): columns to stddev
+            udf (Expression): User-defined function to apply to each row.
 
         Returns:
-            DataFrame: DataFrame with grouped standard deviation.
+            DataFrame: DataFrame with the result of the user-defined function.
         """
-        return self.df._apply_agg_fn(Expression.stddev, cols, self.group_by)
-
-    def min(self, *cols: ColumnInputType) -> "DataFrame":
-        """Perform grouped min on this GroupedDataFrame.
-
-        Args:
-            *cols (Union[str, Expression]): columns to min
-
-        Returns:
-            DataFrame: DataFrame with grouped min.
-        """
-        return self.df._apply_agg_fn(Expression.min, cols, self.group_by)
-
-    def max(self, *cols: ColumnInputType) -> "DataFrame":
-        """Performs grouped max on this GroupedDataFrame.
-
-        Args:
-            *cols (Union[str, Expression]): columns to max
-
-        Returns:
-            DataFrame: DataFrame with grouped max.
-        """
-        return self.df._apply_agg_fn(Expression.max, cols, self.group_by)
-
-    def any_value(self, *cols: ColumnInputType) -> "DataFrame":
-        """Returns an arbitrary value on this GroupedDataFrame.
-
-        Values for each column are not guaranteed to be from the same row.
-
-        Args:
-            *cols (Union[str, Expression]): columns to get
-
-        Returns:
-            DataFrame: DataFrame with any values.
-        """
-        return self.df._apply_agg_fn(Expression.any_value, cols, self.group_by)
-
-    def count(self, *cols: ColumnInputType) -> "DataFrame":
-        """Performs grouped count on this GroupedDataFrame.
-
-        Returns:
-            DataFrame: DataFrame with grouped count per column.
-        """
-        return self.df._apply_agg_fn(Expression.count, cols, self.group_by)
-
-    def agg_list(self, *cols: ColumnInputType) -> "DataFrame":
-        """Performs grouped list on this GroupedDataFrame.
-
-        Returns:
-            DataFrame: DataFrame with grouped list per column.
-        """
-        return self.df._apply_agg_fn(Expression.agg_list, cols, self.group_by)
-
-    def agg_concat(self, *cols: ColumnInputType) -> "DataFrame":
-        """Performs grouped concat on this GroupedDataFrame.
-
-        Returns:
-            DataFrame: DataFrame with grouped concatenated list per column.
-        """
-        return self.df._apply_agg_fn(Expression.agg_concat, cols, self.group_by)
-
-    def agg(self, *to_agg: Union[Expression, Iterable[Expression]]) -> "DataFrame":
-        """Perform aggregations on this GroupedDataFrame. Allows for mixed aggregations.
-
-        For a full list of aggregation expressions, see :ref:`Aggregation Expressions <api=aggregation-expression>`
-
-        Example:
-            >>> import daft
-            >>> from daft import col
-            >>> df = daft.from_pydict(
-            ...     {"pet": ["cat", "dog", "dog", "cat"], "age": [1, 2, 3, 4], "name": ["Alex", "Jordan", "Sam", "Riley"]}
-            ... )
-            >>> grouped_df = df.groupby("pet").agg(
-            ...     col("age").min().alias("min_age"),
-            ...     col("age").max().alias("max_age"),
-            ...     col("pet").count().alias("count"),
-            ...     col("name").any_value(),
-            ... )
-            >>> grouped_df.show()
-            ╭──────┬─────────┬─────────┬────────┬────────╮
-            │ pet  ┆ min_age ┆ max_age ┆ count  ┆ name   │
-            │ ---  ┆ ---     ┆ ---     ┆ ---    ┆ ---    │
-            │ Utf8 ┆ Int64   ┆ Int64   ┆ UInt64 ┆ Utf8   │
-            ╞══════╪═════════╪═════════╪════════╪════════╡
-            │ cat  ┆ 1       ┆ 4       ┆ 2      ┆ Alex   │
-            ├╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌┤
-            │ dog  ┆ 2       ┆ 3       ┆ 2      ┆ Jordan │
-            ╰──────┴─────────┴─────────┴────────┴────────╯
-            <BLANKLINE>
-            (Showing first 2 of 2 rows)
-
-        Args:
-            *to_agg (Union[Expression, Iterable[Expression]]): aggregation expressions
-
-        Returns:
-            DataFrame: DataFrame with grouped aggregations
-        """
-        to_agg_list = (
-            list(to_agg[0])
-            if (len(to_agg) == 1 and not isinstance(to_agg[0], Expression))
-            else list(typing.cast("Tuple[Expression]", to_agg))
-        )
-
-        for expr in to_agg_list:
-            if not isinstance(expr, Expression):
-                raise ValueError(f"GroupedDataFrame.agg() only accepts expression type, received: {type(expr)}")
-
-        return self.df._agg(to_agg_list, group_by=self.group_by)
-
-    def map_groups(self, udf: Expression) -> "DataFrame":
-        """Apply a user-defined function to each group. The name of the resultant column will default to the name of the first input column.
-
-        Example:
-            >>> import daft, statistics
-            >>>
-            >>> df = daft.from_pydict({"group": ["a", "a", "a", "b", "b", "b"], "data": [1, 20, 30, 4, 50, 600]})
-            >>>
-            >>> @daft.udf(return_dtype=daft.DataType.float64())
-            ... def std_dev(data):
-            ...     return [statistics.stdev(data.to_pylist())]
-            >>>
-            >>> df = df.groupby("group").map_groups(std_dev(df["data"]))
-            >>> df.show()
-            ╭───────┬────────────────────╮
-            │ group ┆ data               │
-            │ ---   ┆ ---                │
-            │ Utf8  ┆ Float64            │
-            ╞═══════╪════════════════════╡
-            │ a     ┆ 14.730919862656235 │
-            ├╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤
-            │ b     ┆ 331.62026476076517 │
-            ╰───────┴────────────────────╯
-            <BLANKLINE>
-            (Showing first 2 of 2 rows)
-
-        Args:
-            udf (Expression): User-defined function to apply to each group.
-
-        Returns:
-            DataFrame: DataFrame with grouped aggregations
-        """
-        return self.df._map_groups(udf, group_by=self.group_by)
+        builder = self._builder.map(udf)
+        return DataFrame(builder)
